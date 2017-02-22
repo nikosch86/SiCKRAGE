@@ -480,7 +480,7 @@ def process_media(process_path, video_files, release_name, process_method, force
         if result.result:
             result.output += log_helper(u"Processing succeeded for {0}".format(cur_video_file_path))
         else:
-            result.output += log_helper(u"Processing failed for {0}: {1}".format(cur_video_file_path, process_fail_message), logger.WARNING)
+            result.output += log_helper(u"Processing failed for {0}: '{1}'".format(cur_video_file_path, process_fail_message), logger.WARNING)
             result.missed_files.append(u"{0} : Processing failed: {1}".format(cur_video_file_path, process_fail_message))
             result.aggresult = False
 
