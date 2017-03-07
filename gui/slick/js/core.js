@@ -223,23 +223,80 @@ var SICKRAGE = {
                     $(this).prop('checked', $(bulkCheck).prop('checked'));
                 });
             });
-        }
-    },
-    config: {
-        init: function() {
-            $('#config-components').tabs();
 
             $(".enabler").each(function(){
                 if (!$(this).prop('checked')) { $('#content_'+$(this).attr('id')).hide(); }
             });
 
-            $(".enabler").on('click', function() {
+            $(".enabler").on('change', function() {
                 if ($(this).prop('checked')){
                     $('#content_'+$(this).attr('id')).fadeIn("fast", "linear");
                 } else {
                     $('#content_'+$(this).attr('id')).fadeOut("fast", "linear");
                 }
             });
+        },
+        QualityChooser: {
+            setFromPresets: function (preset) {
+                // FIXME: Sometimes when switching too fast betweeb presets,
+                // it stops updating the selection on #anyQualities
+                if (parseInt(preset) === 0) {
+                    $('#customQuality').show();
+                    return;
+                } else {
+                    $('#customQuality').hide();
+                }
+
+                $('#anyQualities').find('option').each(function() {
+                    var result = preset & $(this).val(); // jshint ignore:line
+                    $(this).attr('selected', result > 0 ? 'selected' : false);
+                });
+
+                $('#bestQualities').find('option').each(function() {
+                    var result = preset & ($(this).val() << 16); // jshint ignore:line
+                    $(this).attr('selected', result > 0 ? 'selected' : false);
+                });
+            },
+            init: function() {
+                var selfObj = this;
+                var qualityPresets = $('#qualityPreset');
+
+                qualityPresets.on('change', function() {
+                    selfObj.setFromPresets(qualityPresets.find(':selected').val());
+                });
+
+                selfObj.setFromPresets(qualityPresets.find(':selected').val());
+            }
+        },
+        updateBlackWhiteList: function(showName) {
+            $('#white').children().remove();
+            $('#black').children().remove();
+            $('#pool').children().remove();
+
+            if ($('#anime').prop('checked')) {
+                $('#blackwhitelist').show();
+                if (showName) {
+                    $.getJSON(srRoot + '/home/fetch_releasegroups', {
+                        'show_name': showName
+                    }, function (data) {
+                        if (data.result === 'success') {
+                            $.each(data.groups, function(i, group) {
+                                var option = $("<option>");
+                                option.attr("value", group.name);
+                                option.html(group.name + ' | ' + group.rating + ' | ' + group.range);
+                                option.appendTo('#pool');
+                            });
+                        }
+                    });
+                }
+            } else {
+                $('#blackwhitelist').hide();
+            }
+        }
+    },
+    config: {
+        init: function() {
+            $('#config-components').tabs();
 
             $(".viewIf").on('click', function() {
                 if ($(this).prop('checked')) {
@@ -1172,6 +1229,7 @@ var SICKRAGE = {
         postProcessing: function() {
             $('#config-components').tabs();
             $('#tv_download_dir').fileBrowser({ title: 'Select TV Download Directory' });
+            $('#unpack_dir').fileBrowser({ title: 'Select Unpack Directory' });
 
             // http://stackoverflow.com/questions/2219924/idiomatic-jquery-delayed-event-only-after-a-short-pause-in-typing-e-g-timew
             var typewatch = (function () {
@@ -1452,11 +1510,21 @@ var SICKRAGE = {
                 fillAnimeExamples();
             }
 
-            $('#unpack').on('change', function(){
-                if(this.checked) {
-                    isRarSupported();
-                } else {
-                    $('#unpack').qtip('toggle', false);
+            if (parseInt($('#unpack').val()) !== 1) {
+                $('#content_unpack').hide();
+            }
+
+            $('#unpack').on('change', function() {
+                switch (parseInt(this.value)) {
+                    case 0: // Ignore
+                    case 2: // Treat as video
+                        $('#content_unpack').fadeOut("fast", "linear");
+                        $('#unpack').qtip('toggle', false);
+                        break;
+                    case 1: // Unpack
+                        $('#content_unpack').fadeIn("fast", "linear");
+                        isRarSupported();
+                        break;
                 }
             });
 
@@ -2019,6 +2087,12 @@ var SICKRAGE = {
     },
     home: {
         init: function(){
+            // Reset the layout for the activated tab (when using ui tabs)
+            $('#showTabs').tabs({
+                activate: function() {
+                    $('.show-grid').isotope('layout');
+               }
+            });
 
         },
         index: function(){
@@ -2123,7 +2197,7 @@ var SICKRAGE = {
                     4: function(node) { return $(node).find("span").text().toLowerCase(); },
                     5: function(node) { return $(node).find("span:first").text(); },
                     6: function(node) { return $(node).data('show-size'); },
-                    7: function(node) { return $(node).find("img").attr("alt"); }
+                    7: function(node) { return $(node).find("span").attr("title").toLowerCase(); }
                 },
                 widgets: ['saveSort', 'zebra', 'stickyHeaders', 'filter', 'columnSelector'],
                 headers: {
@@ -2328,8 +2402,83 @@ var SICKRAGE = {
             });
 
             $('#srRoot').ajaxEpSearch({'colorRow': true});
-            $('#srRoot').ajaxEpSubtitlesSearch();
-            $('#srRoot').ajaxRetrySubtitlesSearch();
+
+            function enableLink(link) {
+                link.on('click.disabled', false);
+                link.prop('enableClick', '1');
+                link.fadeTo("fast", 1);
+            }
+
+            function disableLink(link) {
+                link.off('click.disabled');
+                link.prop('enableClick', '0');
+                link.fadeTo("fast", 0.5);
+            }
+
+            $('.epSubtitlesSearch').on("click", function() {
+                if ($(this).prop('enableClick') === '0') { return false; }
+                disableLink($(this));
+
+                var parent = $(this).parent();
+                var subtitlesTd = parent.siblings('.col-subtitles');
+
+                var icon = $(this).children('span');
+                icon.prop('class', 'loading-spinner16');
+                icon.prop('title', 'Searching');
+
+                $.getJSON($(this).attr('href'), function(data) {
+                    if (data.result.toLowerCase() !== "failure" && data.result.toLowerCase() !== "no subtitles downloaded") {
+                        // clear and update the subtitles column with new information
+                        var subtitles = data.subtitles.split(',');
+                        subtitlesTd.empty();
+                        $.each(subtitles, function(index, language) {
+                            if (language !== "") {
+                                subtitlesTd.append($("<img/>").attr({"src": srRoot+"/images/subtitles/flags/"+language+".png", "alt": language, "width": 16, "height": 11}));
+                            }
+                        });
+                        icon.prop('class', 'displayshow-icon-sub');
+                        enableLink($(this));
+                    } else {
+                        icon.prop('class', 'displayshow-icon-disable');
+                    }
+                    icon.prop('title', data.result);
+                });
+                return false;
+            });
+
+            $('.epRetrySubtitlesSearch').on('click', function() {
+                if ($(this).prop('enableClick') === '0') { return false; }
+
+                var selectedEpisode = $(this);
+                var subtitleModal = $("#confirmSubtitleDownloadModal");
+
+                $('#confirmSubtitleDownloadModal .btn.btn-success').on('click', function() {
+                    disableLink(selectedEpisode);
+                    subtitleModal.modal('hide');
+
+                    var img = selectedEpisode.children('img');
+                    img.hide();
+
+                    selectedEpisode.append($("<span/>").attr({"class": 'loading-spinner16', "title": "Searching"}));
+                    var icon = selectedEpisode.children('span');
+
+                    $.getJSON(selectedEpisode.prop('href'), function(data) {
+                        if (data.result.toLowerCase() === 'failure') {
+                            icon.prop('class', 'displayshow-icon-disable');
+                            icon.prop('title', 'Failed');
+                        } else {
+                            img.prop('title', 'Success');
+                            img.prop('alt', 'Success');
+                            icon.hide();
+                            img.show();
+                        }
+                    });
+                    enableLink(selectedEpisode);
+                    return false;
+                });
+                subtitleModal.modal('show');
+                return false;
+            });
 
             $('#seasonJump').on('change', function(){
                 var id = $('#seasonJump option:selected').val();
@@ -2635,6 +2784,72 @@ var SICKRAGE = {
             });
 
         },
+        editShow: function() {
+            var allExceptions = [];
+
+            $('#location').fileBrowser({ title: 'Select Show Location' });
+
+            SICKRAGE.common.QualityChooser.init();
+
+            // TODO: Make anime button work like in addShow (opens the groups list without a refresh)
+            /*$('#anime').change (function() {
+                SICKRAGE.common.updateBlackWhiteList(getMeta('show.name'));
+            });*/
+
+            $('#submit').click(function() {
+                var allExceptions = [];
+
+                $("#exceptions_list option").each(function() {
+                    allExceptions.push( $(this).val() );
+                });
+
+                $("#exceptions_list").val(allExceptions);
+
+                if(metaToBool('show.is_anime')) { generateBlackWhiteList(); }
+            });
+
+            $('#addSceneName').click(function() {
+                var sceneEx = $('#SceneName').val();
+                var option = $("<option>");
+                allExceptions = [];
+
+                $("#exceptions_list option").each(function() {
+                    allExceptions.push($(this).val());
+                });
+
+                $('#SceneName').val('');
+
+                if ($.inArray(sceneEx, allExceptions) > -1 || (sceneEx === '')) { return; }
+
+                $("#SceneException").show();
+
+                option.attr("value",sceneEx);
+                option.html(sceneEx);
+                return option.appendTo('#exceptions_list');
+            });
+
+            $('#removeSceneName').click(function() {
+                $('#exceptions_list option:selected').remove();
+
+                $(this).toggleSceneException();
+            });
+
+            $.fn.toggleSceneException = function() {
+                allExceptions = [];
+
+                $("#exceptions_list option").each  ( function() {
+                    allExceptions.push( $(this).val() );
+                });
+
+                if (allExceptions === ''){
+                    $("#SceneException").hide();
+                } else {
+                    $("#SceneException").show();
+                }
+            };
+
+            $(this).toggleSceneException();
+        },
         postProcess: function() {
             $('#episodeDir').fileBrowser({ title: 'Select Unprocessed Episode Folder', key: 'postprocessPath' });
         },
@@ -2657,28 +2872,33 @@ var SICKRAGE = {
         },
         restart: function(){
             var currentPid = srPID;
-            var checkIsAlive = setInterval(function(){
-                $.post(srRoot + '/home/is_alive/', function(data) {
-                    if (data.msg.toLowerCase() === 'nope') {
-                        // if it's still initializing then just wait and try again
+            var checkIsAlive = setInterval(function() {
+                $.post(srRoot + '/home/is-alive/', function(data) {
+                    if (data === undefined || data.msg !== currentPid) {
                         $('#restart_message').show();
-                    } else {
-                        // if this is before we've even shut down then just try again later
-                        if (currentPid === '' || data.msg === currentPid) {
-                            $('#shut_down_loading').hide();
-                            $('#shut_down_success').show();
-                            currentPid = data.msg;
-                        } else {
-                            clearInterval(checkIsAlive);
-                            $('#restart_loading').hide();
-                            $('#restart_success').show();
-                            $('#refresh_message').show();
-                            setTimeout(function(){
-                                window.location = srRoot + '/' + srDefaultPage + '/';
-                            }, 5000);
-                        }
+                        $('#shut_down_loading').hide();
+                        $('#shut_down_success').show();
                     }
-                }, 'jsonp');
+                    if (data !== undefined && data.msg !== 'nope' && data.msg !== currentPid) {
+                        clearInterval(checkIsAlive);
+                        $('#restart_loading').hide();
+                        $('#restart_success').show();
+                        $('#refresh_message').show();
+                        srPID = currentPid = data.msg;
+                        checkIsAlive = setInterval(function() {
+                            $.post(srRoot + '/home/is-alive/', function() {
+                                clearInterval(checkIsAlive);
+                                setTimeout(function(){
+                                    window.location = srRoot + '/' + srDefaultPage + '/';
+                                }, 2000);
+                            }, 'jsonp');
+                        }, 100);
+                    }
+                }, 'jsonp').fail(function() {
+                    $('#restart_message').show();
+                    $('#shut_down_loading').hide();
+                    $('#shut_down_success').show();
+                });
             }, 100);
         }
     },
@@ -2728,12 +2948,12 @@ var SICKRAGE = {
                 textExtraction: {
                     2: function(node) { return ($(node).find("img").attr("alt") || 'unknown').toLowerCase(); },  // Network
                     3: function(node) { return $(node).find("span").attr("title").toLowerCase(); },  // Quality
-                    4: function(node) { return $(node).find("img").attr("alt").toLowerCase(); },  // Sports
-                    5: function(node) { return $(node).find("img").attr("alt").toLowerCase(); },  // Scene
-                    6: function(node) { return $(node).find("img").attr("alt").toLowerCase(); },  // Anime
-                    7: function(node) { return $(node).find("img").attr("alt").toLowerCase(); },  // Season Folders
-                    8: function(node) { return $(node).find("img").attr("alt").toLowerCase(); },  // Paused
-                    9: function(node) { return $(node).find("img").attr("alt").toLowerCase(); },  // Subtitle
+                    4: function(node) { return $(node).find("span").attr("title").toLowerCase(); },  // Sports
+                    5: function(node) { return $(node).find("span").attr("title").toLowerCase(); },  // Scene
+                    6: function(node) { return $(node).find("span").attr("title").toLowerCase(); },  // Anime
+                    7: function(node) { return $(node).find("span").attr("title").toLowerCase(); },  // Season Folders
+                    8: function(node) { return $(node).find("span").attr("title").toLowerCase(); },  // Paused
+                    9: function(node) { return $(node).find("span").attr("title").toLowerCase(); },  // Subtitle
                     10: function(node) { return $(node).text().toLowerCase(); },  // Default Episode Status
                     11: function(node) { return $(node).text().toLowerCase(); }  // Show Status
                 },
@@ -2828,7 +3048,34 @@ var SICKRAGE = {
             }
         },
         massEdit: function() {
-            $('#location').fileBrowser({ title: 'Select Show Location' });
+            function findDirIndex(which) {
+                var dirParts = which.split('_');
+                return dirParts[dirParts.length-1];
+            }
+
+            function editRootDir(path, options){
+                $('#new_root_dir_'+options.whichId).val(path);
+                $('#new_root_dir_'+options.whichId).change();
+            }
+
+            $('.new_root_dir').change(function(){
+                var curIndex = findDirIndex($(this).attr('id'));
+                $('#display_new_root_dir_'+curIndex).html('<b>'+$(this).val()+'</b>');
+            });
+
+            $('.edit_root_dir').click(function(){
+                var curIndex = findDirIndex($(this).attr('id'));
+                var initialDir = $("#new_root_dir_"+curIndex).val();
+                $(this).nFileBrowser(editRootDir, {initialDir: initialDir, whichId: curIndex});
+            });
+
+            $('.delete_root_dir').click(function(){
+                var curIndex = findDirIndex($(this).attr('id'));
+                $('#new_root_dir_'+curIndex).val(null);
+                $('#display_new_root_dir_'+curIndex).html('<b>DELETED</b>');
+            });
+
+            SICKRAGE.common.QualityChooser.init();
         },
         episodeStatuses: function() {
             $('.allCheck').on('click', function(){
@@ -3148,7 +3395,7 @@ var SICKRAGE = {
             }
 
             if(isMeta('sickbeard.COMING_EPS_LAYOUT', ['banner', 'poster'])){
-                $('#srRoot').ajaxEpSearch({'size': 16, 'loadingImage': 'loading16' + themeSpinner + '.gif'});
+                $('#srRoot').ajaxEpSearch();
                 $('.ep_summary').hide();
                 $('.ep_summaryTrigger').click(function() {
                     $(this).next('.ep_summary').slideToggle('normal', function() {
@@ -3268,42 +3515,12 @@ var SICKRAGE = {
                 $('#saveDefaultsButton').attr('disabled', false);
             });
 
-            $('#qualityPreset').on('change', function() {
-                //fix issue #181 - force re-render to correct the height of the outer div
-                $('span.prev').click();
-                $('span.next').click();
-            });
+            SICKRAGE.common.QualityChooser.init();
         },
         index: function() {
 
         },
         newShow: function() {
-            function updateBlackWhiteList(showName) {
-                $('#white').children().remove();
-                $('#black').children().remove();
-                $('#pool').children().remove();
-
-                if ($('#anime').prop('checked')) {
-                    $('#blackwhitelist').show();
-                    if (showName) {
-                        $.getJSON(srRoot + '/home/fetch_releasegroups', {
-                            'show_name': showName
-                        }, function (data) {
-                            if (data.result === 'success') {
-                                $.each(data.groups, function(i, group) {
-                                    var option = $("<option>");
-                                    option.attr("value", group.name);
-                                    option.html(group.name + ' | ' + group.rating + ' | ' + group.range);
-                                    option.appendTo('#pool');
-                                });
-                            }
-                        });
-                    }
-                } else {
-                    $('#blackwhitelist').hide();
-                }
-            }
-
             function updateSampleText() {
                 // if something's selected then we have some behavior to figure out
 
@@ -3316,7 +3533,7 @@ var SICKRAGE = {
                 } else {
                     showName = '';
                 }
-                updateBlackWhiteList(showName);
+                SICKRAGE.common.updateBlackWhiteList(showName);
                 var sampleText = 'Adding show <b>' + showName + '</b> into <b>';
 
                 // if we have a root dir selected, figure out the path
@@ -3455,10 +3672,6 @@ var SICKRAGE = {
                 $('#addShowForm').submit();
             });
 
-            $('#qualityPreset').change(function () {
-                myform.loadsection(2);
-            });
-
             /***********************************************
             * jQuery Form to Form Wizard- (c) Dynamic Drive (www.dynamicdrive.com)
             * This notice MUST stay intact for legal use
@@ -3498,6 +3711,10 @@ var SICKRAGE = {
 
             $('#anime').change (function() {
                 updateSampleText();
+                myform.loadsection(2);
+            });
+
+            $('#qualityPreset').change (function() {
                 myform.loadsection(2);
             });
 

@@ -19,7 +19,7 @@
 # along with SickRage. If not, see <http://www.gnu.org/licenses/>.
 # pylint:disable=too-many-lines
 
-from __future__ import unicode_literals
+from __future__ import print_function, unicode_literals
 
 import ast
 import base64
@@ -39,9 +39,8 @@ import ssl
 import stat
 import time
 import traceback
-import urllib
 import uuid
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ElementTree
 import zipfile
 from contextlib import closing
 from itertools import cycle, izip
@@ -52,6 +51,10 @@ import cfscrape
 import requests
 from cachecontrol import CacheControl
 from requests.utils import urlparse
+import six
+
+# noinspection PyUnresolvedReferences
+from six.moves import urllib
 
 import sickbeard
 from sickbeard import classes, db, logger
@@ -59,9 +62,6 @@ from sickbeard.common import USER_AGENT
 from sickrage.helper import MEDIA_EXTENSIONS, SUBTITLE_EXTENSIONS, episode_num, pretty_file_size
 from sickrage.helper.encoding import ek
 from sickrage.show.Show import Show
-
-
-
 
 
 # pylint: disable=protected-access
@@ -158,11 +158,12 @@ def remove_non_release_groups(name):
         r'- \[ www\.torrentday\.com \]$': 'searchre',
         r'^\[ www\.TorrentDay\.com \] - ': 'searchre',
         r'\[NO-RAR\] - \[ www\.torrentday\.com \]$': 'searchre',
-        r'^www\.Torrenting\.com\.-\.': 'searchre'
+        r'^www\.Torrenting\.com\.-\.': 'searchre',
+        r'-Scrambled$': 'searchre'
     }
 
     _name = name
-    for remove_string, remove_type in removeWordsList.iteritems():
+    for remove_string, remove_type in six.iteritems(removeWordsList):
         if remove_type == 'search':
             _name = _name.replace(remove_string, '')
         elif remove_type == 'searchre':
@@ -181,7 +182,8 @@ def is_media_file(filename):
 
     # ignore samples
     try:
-        assert isinstance(filename, (str, unicode)), type(filename)
+        assert isinstance(filename, six.string_types), type(filename)
+        is_rar = is_rar_file(filename)
         filename = ek(os.path.basename, filename)
 
         if re.search(r'(^|[\W_])(?<!shomin.)(sample\d*)[\W_]', filename, re.I):
@@ -200,7 +202,7 @@ def is_media_file(filename):
         if re.search('extras?$', filname_parts[0], re.I):
             return False
 
-        return filname_parts[-1].lower() in MEDIA_EXTENSIONS
+        return filname_parts[-1].lower() in MEDIA_EXTENSIONS or (sickbeard.UNPACK == 2 and is_rar)
     except (TypeError, AssertionError) as error:  # Not a string
         logger.log('Invalid filename. Filename must be a string. {0}'.format(error), logger.DEBUG)  # pylint: disable=no-member
         return False
@@ -380,14 +382,14 @@ def moveFile(srcFile, destFile):
 def link(src, dst):
     """
     Create a file link from source to destination.
-    TODO: Make this unicode proof
+    TODO: Make this six.text_type proof
 
     :param src: Source file
     :param dst: Destination file
     """
 
     if platform.system() == 'Windows':
-        if ctypes.windll.kernel32.CreateHardLinkW(ctypes.c_wchar_p(unicode(dst)), ctypes.c_wchar_p(unicode(src)), None) == 0:
+        if ctypes.windll.kernel32.CreateHardLinkW(ctypes.c_wchar_p(six.text_type(dst)), ctypes.c_wchar_p(six.text_type(src)), None) == 0:
             raise ctypes.WinError()
     else:
         ek(os.link, src, dst)
@@ -419,7 +421,7 @@ def symlink(src, dst):
     """
 
     if platform.system() == 'Windows':
-        if ctypes.windll.kernel32.CreateSymbolicLinkW(ctypes.c_wchar_p(unicode(dst)), ctypes.c_wchar_p(unicode(src)), 1 if ek(os.path.isdir, src) else 0) in [0, 1280]:
+        if ctypes.windll.kernel32.CreateSymbolicLinkW(ctypes.c_wchar_p(six.text_type(dst)), ctypes.c_wchar_p(six.text_type(src)), 1 if ek(os.path.isdir, src) else 0) in [0, 1280]:
             raise ctypes.WinError()
     else:
         ek(os.symlink, src, dst)
@@ -658,7 +660,7 @@ def fixSetGroupID(childPath):
         childPath_owner = childStat.st_uid  # pylint: disable=no-member
         user_id = os.geteuid()  # @UndefinedVariable - only available on UNIX
 
-        if user_id != 0 and user_id != childPath_owner:
+        if user_id not in (childPath_owner, 0):
             logger.log("Not running as root or owner of " + childPath + ", not trying to set the set-group-ID",
                        logger.DEBUG)
             return
@@ -1068,11 +1070,11 @@ def is_hidden_folder(folder):
     """
     def is_hidden(filepath):
         name = ek(os.path.basename, ek(os.path.abspath, filepath))
-        return name == u'@eaDir' or name.startswith('.') or has_hidden_attribute(filepath)
+        return name == '@eaDir' or name.startswith('.') or has_hidden_attribute(filepath)
 
     def has_hidden_attribute(filepath):
         try:
-            attrs = ctypes.windll.kernel32.GetFileAttributesW(ctypes.c_wchar_p(unicode(filepath)))
+            attrs = ctypes.windll.kernel32.GetFileAttributesW(ctypes.c_wchar_p(six.text_type(filepath)))
             assert attrs != -1
             result = bool(attrs & 2)
         except (AttributeError, AssertionError, OSError, IOError):
@@ -1085,12 +1087,26 @@ def is_hidden_folder(folder):
 
     return False
 
-
 def real_path(path):
     """
     Returns: the canonicalized absolute pathname. The resulting path will have no symbolic link, '/./' or '/../' components.
     """
     return ek(os.path.normpath, ek(os.path.normcase, ek(os.path.realpath, path)))
+
+def is_subdirectory(subdir_path, topdir_path):
+    """
+    Returns true if a subdir_path is a subdirectory of topdir_path
+    else otherwise.
+
+    :param subdir_path: The full path to the sub-directory
+    :param topdir_path: The full path to the top directory to check subdir_path against
+    """
+    topdir_path = real_path(topdir_path)
+    subdir_path = real_path(subdir_path)
+
+    # checks if the common prefix of both is equal to directory
+    # e.g. /a/b/c/d.rst and directory is /a/b, the common prefix is /a/b
+    return os.path.commonprefix([subdir_path, topdir_path]) == topdir_path
 
 
 def validateShow(show, season=None, episode=None):
@@ -1169,8 +1185,8 @@ def extractZip(archive, targetDir):
     """
     Unzip a file to a directory
 
-    :param fileList: A list of file names - full path each name
-    :param archive: The file name for the archive with a full path
+    :param archive: The file name of the archive to extract with a full path
+    :param targetDir: The full path to the extraction target directory
     """
 
     try:
@@ -1186,7 +1202,7 @@ def extractZip(archive, targetDir):
 
             # copy file (taken from zipfile's extract)
             source = zip_file.open(member)
-            target = file(ek(os.path.join, targetDir, filename), "wb")
+            target = open(ek(os.path.join, targetDir, filename), "wb")
             shutil.copyfileobj(source, target)
             source.close()
             target.close()
@@ -1197,7 +1213,7 @@ def extractZip(archive, targetDir):
         return False
 
 
-def backupConfigZip(fileList, archive, arcname=None):
+def backup_config_zip(fileList, archive, arcname=None):
     """
     Store the config file as a ZIP
 
@@ -1218,7 +1234,7 @@ def backupConfigZip(fileList, archive, arcname=None):
         return False
 
 
-def restoreConfigZip(archive, targetDir):
+def restore_config_zip(archive, targetDir):
     """
     Restores a Config ZIP file back in place
 
@@ -1363,15 +1379,44 @@ def getURL(url, post_data=None, params=None, headers=None,  # pylint:disable=too
 
         hooks, cookies, verify, proxies = request_defaults(kwargs)
 
-        if params and isinstance(params, (list, dict)):
-            for param in params:
-                if isinstance(params[param], unicode):
-                    params[param] = params[param].encode('utf-8')
+        # Dict, loop through and change all key,value pairs to bytes
+        if isinstance(params, dict):
+            for key, value in six.iteritems(params):
+                if isinstance(key, six.text_type):
+                    del params[key]
+                    key = key.encode('utf-8')
 
-        if post_data and isinstance(post_data, (list, dict)):
-            for param in post_data:
-                if isinstance(post_data[param], unicode):
-                    post_data[param] = post_data[param].encode('utf-8')
+                if isinstance(value, six.text_type):
+                    value = value.encode('utf-8')
+                params[key] = value
+
+        if isinstance(post_data, dict):
+            for key, value in six.iteritems(post_data):
+                if isinstance(key, six.text_type):
+                    del post_data[key]
+                    key = key.encode('utf-8')
+
+                if isinstance(value, six.text_type):
+                    value = value.encode('utf-8')
+                post_data[key] = value
+
+        # List, loop through and change all indexes to bytes
+        if isinstance(params, list):
+            for index, value in enumerate(params):
+                if isinstance(value, six.text_type):
+                    params[index] = value.encode('utf-8')
+
+        if isinstance(post_data, list):
+            for index, value in enumerate(post_data):
+                if isinstance(value, six.text_type):
+                    post_data[index] = value.encode('utf-8')
+
+        # Unicode, encode to bytes
+        if isinstance(params, six.text_type):
+            params = params.encode('utf-8')
+
+        if isinstance(post_data, six.text_type):
+            post_data = post_data.encode('utf-8')
 
         resp = session.request(
             'POST' if post_data else 'GET', url, data=post_data or {}, params=params or {},
@@ -1523,7 +1568,7 @@ def generateCookieSecret():
 def disk_usage(path):
     if platform.system() == 'Windows':
         free = ctypes.c_ulonglong(0)
-        if ctypes.windll.kernel32.GetDiskFreeSpaceExW(ctypes.c_wchar_p(unicode(path)), None, None, ctypes.pointer(free)) == 0:
+        if ctypes.windll.kernel32.GetDiskFreeSpaceExW(ctypes.c_wchar_p(six.text_type(path)), None, None, ctypes.pointer(free)) == 0:
             raise ctypes.WinError()
         return free.value
 
@@ -1687,7 +1732,7 @@ def tvdbid_from_remote_id(indexer_id, indexer):  # pylint:disable=too-many-retur
         if data is None:
             return tvdb_id
         try:
-            tree = ET.fromstring(data)
+            tree = ElementTree.fromstring(data)
             for show in tree.getiterator("Series"):
                 tvdb_id = show.findtext("seriesid")
 
@@ -1701,7 +1746,7 @@ def tvdbid_from_remote_id(indexer_id, indexer):  # pylint:disable=too-many-retur
         if data is None:
             return tvdb_id
         try:
-            tree = ET.fromstring(data)
+            tree = ElementTree.fromstring(data)
             for show in tree.getiterator("Series"):
                 tvdb_id = show.findtext("seriesid")
 
@@ -1753,18 +1798,43 @@ MESSAGE_COUNTER = 0
 
 
 def add_site_message(message, level='danger'):
-    to_add = dict(level=level, message=message)
+    with sickbeard.MESSAGES_LOCK:
+        to_add = dict(level=level, message=message)
 
-    for index, existing in sickbeard.SITE_MESSAGES.iteritems():
-        if re.sub(r'\d+', '#', existing['message']) == re.sub(r'\d+', '#', message):
-            sickbeard.SITE_MESSAGES[index] = to_add
-            return
+        basic_update_url = sickbeard.versionChecker.UpdateManager.get_update_url().split('?')[0]
+        for index, existing in six.iteritems(sickbeard.SITE_MESSAGES):
+            if basic_update_url in existing['message'] and basic_update_url in message:
+                sickbeard.SITE_MESSAGES[index] = to_add
+                return
 
-        if message.endswith('Please use \'master\' unless specifically asked') and \
-                existing['message'].endswith('Please use \'master\' unless specifically asked'):
-            sickbeard.SITE_MESSAGES[index] = to_add
-            return
+            if message.endswith('Please use \'master\' unless specifically asked') and \
+                    existing['message'].endswith('Please use \'master\' unless specifically asked'):
+                sickbeard.SITE_MESSAGES[index] = to_add
+                return
 
-    global MESSAGE_COUNTER
-    MESSAGE_COUNTER += 1
-    sickbeard.SITE_MESSAGES[MESSAGE_COUNTER] = to_add
+            if message.startswith('No NZB/Torrent providers found or enabled for') and \
+                    existing['message'].startswith('No NZB/Torrent providers found or enabled for'):
+                sickbeard.SITE_MESSAGES[index] = to_add
+                return
+
+        global MESSAGE_COUNTER
+        MESSAGE_COUNTER += 1
+        sickbeard.SITE_MESSAGES[MESSAGE_COUNTER] = to_add
+
+
+def remove_site_message(begins='', ends='', contains='', key=None):
+    with sickbeard.MESSAGES_LOCK:
+        if key is not None and int(key) in sickbeard.SITE_MESSAGES:
+            del sickbeard.SITE_MESSAGES[int(key)]
+
+        for index, existing in six.iteritems(sickbeard.SITE_MESSAGES.copy()):
+            checks = []
+            if begins and isinstance(begins, six.string_types):
+                checks.append(existing['message'].startswith(begins))
+            if ends and isinstance(ends, six.string_types):
+                checks.append(existing['message'].endsswith(ends))
+            if contains and isinstance(ends, six.string_types):
+                checks.append(contains in existing['message'])
+
+            if all(checks):
+                del sickbeard.SITE_MESSAGES[index]

@@ -1,6 +1,6 @@
 # coding=utf-8
 # Author: Nic Wolfe <nic@wolfeden.ca>
-# URL: http://code.google.com/p/sickbeard/
+# URL: https://sickrage.github.io
 #
 # This file is part of SickRage.
 #
@@ -66,8 +66,7 @@ from sickbeard.common import NAMING_DUPLICATE, NAMING_EXTEND, NAMING_LIMITED_EXT
     NAMING_LIMITED_EXTEND_E_PREFIXED
 
 import shutil
-
-
+import six
 
 
 def dirty_setter(attr_name):
@@ -437,6 +436,7 @@ class TVShow(object):  # pylint: disable=too-many-instance-attributes, too-many-
                     "Name " + ep_file_name + " gave release group of " + parse_result.release_group + ", seems valid",
                     logger.DEBUG)
                 curEpisode.release_name = ep_file_name
+                curEpisode.release_group = parse_result.release_group
 
             # store the reference in the show
             if curEpisode is not None:
@@ -695,6 +695,7 @@ class TVShow(object):  # pylint: disable=too-many-instance-attributes, too-many-
             if not same_file:
                 with curEp.lock:
                     curEp.release_name = ''
+                    curEp.release_group = ''
 
             # if they replace a file on me I'll make some attempt at re-checking the quality unless I know it's the same file
             if checkQualityAgain and not same_file:
@@ -751,7 +752,7 @@ class TVShow(object):  # pylint: disable=too-many-instance-attributes, too-many-
 
         # logger.log(str(self.indexerid) + ": Loading show info from database", logger.DEBUG)
 
-        main_db_con = db.DBConnection()
+        main_db_con = db.DBConnection(row_type='dict')
         sql_results = main_db_con.select("SELECT * FROM tv_shows WHERE indexer_id = ?", [self.indexerid])
 
         if len(sql_results) > 1:
@@ -913,7 +914,7 @@ class TVShow(object):  # pylint: disable=too-many-instance-attributes, too-many-
 
         for key in [x for x in imdb_info.keys() if x.replace('_', ' ') in imdbTv.keys()]:
             # Store only the first value for string type
-            if isinstance(imdb_info[key], basestring) and isinstance(imdbTv.get(key.replace('_', ' ')), list):
+            if isinstance(imdb_info[key], six.string_types) and isinstance(imdbTv.get(key.replace('_', ' ')), list):
                 imdb_info[key] = imdbTv.get(key.replace('_', ' '))[0]
             else:
                 imdb_info[key] = imdbTv.get(key.replace('_', ' '))
@@ -958,7 +959,7 @@ class TVShow(object):  # pylint: disable=too-many-instance-attributes, too-many-
 
         # Rename dict keys without spaces for DB upsert
         self.imdb_info = dict(
-            (k.replace(' ', '_'), k(v) if hasattr(v, 'keys') else v) for k, v in imdb_info.iteritems())
+            (k.replace(' ', '_'), k(v) if hasattr(v, 'keys') else v) for k, v in six.iteritems(imdb_info))
         logger.log(str(self.indexerid) + ": Obtained info from IMDb ->" + str(self.imdb_info), logger.DEBUG)
 
     def nextEpisode(self):
@@ -1095,6 +1096,7 @@ class TVShow(object):  # pylint: disable=too-many-instance-attributes, too-many-
                         curEp.hasnfo = False
                         curEp.hastbn = False
                         curEp.release_name = ''
+                        curEp.release_group = ''
 
                         sql_l.append(curEp.get_sql())
 
@@ -1400,7 +1402,6 @@ class TVEpisode(object):  # pylint: disable=too-many-instance-attributes, too-ma
             self.saveToDB()
 
     def download_subtitles(self, force=False, force_lang=None):
-        force_ = force
         if not ek(os.path.isfile, self.location):
             logger.log("{id}: Episode file doesn't exist, can't download subtitles for {ep}".format
                        (id=self.show.indexerid, ep=episode_num(self.season, self.episode)),
@@ -1519,7 +1520,7 @@ class TVEpisode(object):  # pylint: disable=too-many-instance-attributes, too-ma
                 self.subtitles = sql_results[0][b"subtitles"].split(",")
             self.subtitles_searchcount = sql_results[0][b"subtitles_searchcount"]
             self.subtitles_lastsearch = sql_results[0][b"subtitles_lastsearch"]
-            self.airdate = datetime.date.fromordinal(long(sql_results[0][b"airdate"]))
+            self.airdate = datetime.date.fromordinal(int(sql_results[0][b"airdate"]))
             # logger.log("1 Status changes from " + str(self.status) + " to " + str(sql_results[0][b"status"]), logger.DEBUG)
             self.status = int(sql_results[0][b"status"] or -1)
 
@@ -2329,7 +2330,7 @@ class TVEpisode(object):  # pylint: disable=too-many-instance-attributes, too-ma
                             ep_string += '-' + "{#:03d}".format(**{"#": relEp.episode})
 
             regex_replacement = None
-            if anime_type == 2:
+            if anime_type == 2 and not ep_only_match:
                 regex_replacement = r'\g<pre_sep>' + ep_string + r'\g<post_sep>'
             elif season_ep_match:
                 regex_replacement = r'\g<pre_sep>\g<2>\g<3>' + ep_string + r'\g<post_sep>'

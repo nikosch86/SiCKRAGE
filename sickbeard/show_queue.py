@@ -1,6 +1,6 @@
 # coding=utf-8
 # Author: Nic Wolfe <nic@wolfeden.ca>
-# URL: http://code.google.com/p/sickbeard/
+# URL: https://sickrage.github.io
 #
 # This file is part of SickRage.
 #
@@ -36,6 +36,9 @@ from sickrage.helper.encoding import ek
 from sickrage.helper.exceptions import CantRefreshShowException, CantRemoveShowException, CantUpdateShowException, \
     EpisodeDeletedException, MultipleShowObjectsException, ShowDirectoryNotFoundException
 from sickrage.show.Show import Show
+
+
+import six
 
 
 class ShowQueue(generic_queue.GenericQueue):
@@ -127,13 +130,11 @@ class ShowQueue(generic_queue.GenericQueue):
         return queueItemObj
 
     def renameShowEpisodes(self, show, force=False):
-        force_ = force
         queueItemObj = QueueItemRename(show)
         self.add_item(queueItemObj)
         return queueItemObj
 
     def download_subtitles(self, show, force=False):
-        force_ = force
         queueItemObj = QueueItemSubtitle(show)
         self.add_item(queueItemObj)
         return queueItemObj
@@ -290,7 +291,7 @@ class QueueItemAdd(ShowQueueItem):  # pylint: disable=too-many-instance-attribut
 
         if self.showDir:
             try:
-                assert isinstance(self.showDir, unicode)
+                assert isinstance(self.showDir, six.text_type)
             except AssertionError:
                 logger.log(traceback.format_exc(), logger.WARNING)
                 self._finishEarly()
