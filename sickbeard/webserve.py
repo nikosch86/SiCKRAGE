@@ -24,7 +24,6 @@ import ast
 import datetime
 import gettext
 import os
-import rarfile
 import re
 import time
 import traceback
@@ -45,10 +44,8 @@ from mimetypes import guess_type
 
 from operator import attrgetter
 
-import platform
-
 from tornado.routes import route
-from tornado.web import RequestHandler, HTTPError, authenticated
+from tornado.web import RequestHandler, StaticFileHandler, HTTPError, authenticated
 from tornado.gen import coroutine
 from tornado.ioloop import IOLoop
 from tornado.process import cpu_count
@@ -68,7 +65,7 @@ from sickbeard import config, sab, clients, notifiers, ui, logger, \
     network_timezones
 from sickbeard.providers import newznab, rsstorrent
 from sickbeard.common import Quality, Overview, statusStrings, cpu_presets, \
-    SNATCHED, UNAIRED, IGNORED, WANTED, FAILED, SKIPPED
+    SNATCHED, UNAIRED, IGNORED, WANTED, FAILED, SKIPPED, NAMING_LIMITED_EXTEND_E_PREFIXED
 
 from sickbeard.blackandwhitelist import BlackAndWhiteList, short_group_names
 from sickbeard.browser import foldersAtPath
@@ -98,7 +95,10 @@ from sickrage.system.Restart import Restart
 from sickrage.system.Shutdown import Shutdown
 
 import six
+
+# noinspection PyUnresolvedReferences
 from six.moves import urllib
+# noinspection PyUnresolvedReferences
 from six.moves.urllib.parse import unquote_plus
 
 
@@ -236,7 +236,8 @@ class BaseHandler(RequestHandler):
         if not status:
             status = 301 if permanent else 302
         else:
-            assert isinstance(status, int) and 300 <= status <= 399
+            assert isinstance(status, int)
+            assert 300 <= status <= 399
         self.set_status(status)
         self.set_header("Location", urljoin(utf8(self.request.uri), utf8(url)))
 
@@ -245,6 +246,9 @@ class BaseHandler(RequestHandler):
             return self.get_secure_cookie('sickrage_user')
         else:
             return True
+
+    def get_user_locale(self):
+        return sickbeard.GUI_LANG or None
 
 
 class WebHandler(BaseHandler):
@@ -345,6 +349,21 @@ class KeyHandler(RequestHandler):
             self.finish({'success': False, 'error': 'Failed returning results'})
 
 
+class LocaleFileHandler(StaticFileHandler):
+    """ Handles serving locale data on /locale/messages.json for js-gettext """
+    def initialize(self, path):
+        """ Alter 'path' to replace {lang_code} with the requested lang (for example: en_US) """
+        self.abs_path = ek(os.path.normpath, path.format(lang_code=sickbeard.GUI_LANG))
+        super(LocaleFileHandler, self).initialize(self.abs_path)
+
+    def get(self, path='messages.json', include_body=True):
+        """ Get messages.json of the requested lang """
+        if os.path.isfile(os.path.join(self.abs_path, path)):
+            super(LocaleFileHandler, self).get(path, include_body)
+        else:
+            raise HTTPError(404)
+
+
 @route('(.*)(/?)')
 class WebRoot(WebHandler):
     def __init__(self, *args, **kwargs):
@@ -363,7 +382,7 @@ class WebRoot(WebHandler):
             return (helpers.remove_article(x), x)[not x or sickbeard.SORT_ARTICLE]
 
         main_db_con = db.DBConnection(row_type='dict')
-        shows = sorted(sickbeard.showList, key=lambda mbr: attrgetter('name')(mbr).lower())
+        shows = sorted(sickbeard.showList, key=lambda mbr: attrgetter('sort_name')(mbr))
         episodes = {}
 
         results = main_db_con.select(
@@ -595,7 +614,7 @@ class UI(WebRoot):
 
     def get_messages(self):
         self.set_header('Cache-Control', 'max-age=0,no-cache,no-store')
-        self.set_header("Content-Type", "application/json")
+        self.set_header('Content-Type', 'application/json')
         messages = {}
         cur_notification_num = 1
         for cur_notification in ui.notifications.get_notifications(self.request.remote_ip):
@@ -642,14 +661,14 @@ class WebFileBrowser(WebRoot):
     def index(self, path='', includeFiles=False, imagesOnly=False):  # pylint: disable=arguments-differ
 
         self.set_header('Cache-Control', 'max-age=0,no-cache,no-store')
-        self.set_header("Content-Type", "application/json")
+        self.set_header('Content-Type', 'application/json')
 
         return json.dumps(foldersAtPath(path, True, bool(int(includeFiles)), bool(int(imagesOnly))))
 
     def complete(self, term, includeFiles=False, imagesOnly=False):
 
         self.set_header('Cache-Control', 'max-age=0,no-cache,no-store')
-        self.set_header("Content-Type", "application/json")
+        self.set_header('Content-Type', 'application/json')
         paths = [entry['path'] for entry in foldersAtPath(ek(os.path.dirname, term), includeFiles=bool(int(includeFiles)), imagesOnly=bool(int(imagesOnly)))
                  if 'path' in entry]
 
@@ -713,20 +732,28 @@ class Home(WebRoot):
                         anime.append(show)
                     else:
                         shows.append(show)
-            showlists = [["Shows", shows], ["Anime", anime]]
+
+            sortedShowLists = [
+                ["Shows", sorted(shows, key=lambda mbr: attrgetter('sort_name')(mbr))],
+                ["Anime", sorted(anime, key=lambda mbr: attrgetter('sort_name')(mbr))]
+            ]
         else:
             shows = []
             for show in sickbeard.showList:
                 if selected_root_dir in show._location:
                     shows.append(show)
-            showlists = [["Shows", shows]]
+
+            sortedShowLists = [
+                ["Shows", sorted(shows, key=lambda mbr: attrgetter('sort_name')(mbr))]
+            ]
 
         stats = self.show_statistics()
-        return t.render(title=_("Home"), header=_("Show List"), topmenu="home", showlists=showlists, show_stat=stats[
+        return t.render(title=_("Home"), header=_("Show List"), topmenu="home", sortedShowLists=sortedShowLists, show_stat=stats[
             0], max_download_count=stats[1], controller="home", action="index", selected_root=selected_root or '-1')
 
     @staticmethod
     def show_statistics():
+        """ Loads show and episode statistics from db """
         main_db_con = db.DBConnection()
         today = str(datetime.date.today().toordinal())
 
@@ -738,12 +765,18 @@ class Home(WebRoot):
         sql_statement += ' (SELECT COUNT(*) FROM tv_episodes WHERE showid=tv_eps.showid AND season > 0 AND episode > 0 AND airdate > 1 AND status IN ' + status_quality + ') AS ep_snatched,'
         sql_statement += ' (SELECT COUNT(*) FROM tv_episodes WHERE showid=tv_eps.showid AND season > 0 AND episode > 0 AND airdate > 1 AND status IN ' + status_download + ') AS ep_downloaded,'
         sql_statement += ' (SELECT COUNT(*) FROM tv_episodes WHERE showid=tv_eps.showid AND season > 0 AND episode > 0 AND airdate > 1'
-        sql_statement += ' AND ((airdate <= ' + today + ' AND (status = ' + str(SKIPPED) + ' OR status = ' + str(WANTED) + ' OR status = ' + str(FAILED) + '))'
+        sql_statement += ' AND ((airdate <= ' + today + ' AND status IN (' + ','.join([str(SKIPPED), str(WANTED), str(FAILED)]) + '))'
         sql_statement += ' OR (status IN ' + status_quality + ') OR (status IN ' + status_download + '))) AS ep_total,'
 
         sql_statement += ' (SELECT airdate FROM tv_episodes WHERE showid=tv_eps.showid AND airdate >= ' + today
-        sql_statement += ' AND (status = ' + str(UNAIRED) + ' OR status = ' + str(WANTED) + ') ORDER BY airdate ASC LIMIT 1) AS ep_airs_next,'
-        sql_statement += ' (SELECT airdate FROM tv_episodes WHERE showid=tv_eps.showid AND airdate > 1 AND status <> ' + str(UNAIRED) + ' ORDER BY airdate DESC LIMIT 1) AS ep_airs_prev,'
+        sql_statement += (' AND season > 0', '')[sickbeard.DISPLAY_SHOW_SPECIALS] + ' AND status IN (' + ','.join([str(UNAIRED), str(WANTED)]) + ')'
+        sql_statement += ' ORDER BY airdate ASC LIMIT 1) AS ep_airs_next,'
+
+        sql_statement += ' (SELECT airdate FROM tv_episodes WHERE showid=tv_eps.showid AND airdate > 1'
+        sql_statement += (' AND season > 0', '')[sickbeard.DISPLAY_SHOW_SPECIALS] + ' AND status <> ' + str(UNAIRED)
+        sql_statement += ' ORDER BY airdate DESC LIMIT 1) AS ep_airs_prev,'
+
+        # @TODO: Store each show_size in tv_shows. also change in displayShow.mako:250, where we use helpers.get_size()
         sql_statement += ' (SELECT SUM(file_size) FROM tv_episodes WHERE showid=tv_eps.showid) AS show_size'
         sql_statement += ' FROM tv_episodes tv_eps GROUP BY showid'
 
@@ -1328,29 +1361,29 @@ class Home(WebRoot):
 
         show_message = ''
 
-        if sickbeard.showQueueScheduler.action.isBeingAdded(show_obj):
+        if sickbeard.showQueueScheduler.action.is_being_added(show_obj):
             show_message = _('This show is in the process of being downloaded - the info below is incomplete.')
 
-        elif sickbeard.showQueueScheduler.action.isBeingUpdated(show_obj):
+        elif sickbeard.showQueueScheduler.action.is_being_updated(show_obj):
             show_message = _('The information on this page is in the process of being updated.')
 
-        elif sickbeard.showQueueScheduler.action.isBeingRefreshed(show_obj):
+        elif sickbeard.showQueueScheduler.action.is_being_refreshed(show_obj):
             show_message = _('The episodes below are currently being refreshed from disk')
 
-        elif sickbeard.showQueueScheduler.action.isBeingSubtitled(show_obj):
+        elif sickbeard.showQueueScheduler.action.is_being_subtitled(show_obj):
             show_message = _('Currently downloading subtitles for this show')
 
-        elif sickbeard.showQueueScheduler.action.isInRefreshQueue(show_obj):
+        elif sickbeard.showQueueScheduler.action.is_in_refresh_queue(show_obj):
             show_message = _('This show is queued to be refreshed.')
 
-        elif sickbeard.showQueueScheduler.action.isInUpdateQueue(show_obj):
+        elif sickbeard.showQueueScheduler.action.is_in_update_queue(show_obj):
             show_message = _('This show is queued and awaiting an update.')
 
-        elif sickbeard.showQueueScheduler.action.isInSubtitleQueue(show_obj):
+        elif sickbeard.showQueueScheduler.action.is_in_subtitle_queue(show_obj):
             show_message = _('This show is queued and awaiting subtitles download.')
 
-        if not sickbeard.showQueueScheduler.action.isBeingAdded(show_obj):
-            if not sickbeard.showQueueScheduler.action.isBeingUpdated(show_obj):
+        if not sickbeard.showQueueScheduler.action.is_being_added(show_obj):
+            if not sickbeard.showQueueScheduler.action.is_being_updated(show_obj):
                 if show_obj.paused:
                     submenu.append({'title': _('Resume'), 'path': 'home/togglePause?show={0:d}'.format(show_obj.indexerid), 'icon': 'fa fa-play'})
                 else:
@@ -1369,7 +1402,7 @@ class Home(WebRoot):
 
                 submenu.append({'title': _('Preview Rename'), 'path': 'home/testRename?show={0:d}'.format(show_obj.indexerid), 'icon': 'fa fa-tag'})
 
-                if sickbeard.USE_SUBTITLES and show_obj.subtitles and not sickbeard.showQueueScheduler.action.isBeingSubtitled(show_obj):
+                if sickbeard.USE_SUBTITLES and show_obj.subtitles and not sickbeard.showQueueScheduler.action.is_being_subtitled(show_obj):
                     submenu.append({'title': _('Download Subtitles'), 'path': 'home/subtitleShow?show={0:d}'.format(show_obj.indexerid), 'icon': 'fa fa-language'})
 
         epCounts = {
@@ -1402,12 +1435,12 @@ class Home(WebRoot):
                 else:
                     shows.append(show)
             sortedShowLists = [
-                ["Shows", sorted(shows, key=lambda mbr: attrgetter('name')(mbr).lower())],
-                ["Anime", sorted(anime, key=lambda mbr: attrgetter('name')(mbr).lower())]
+                ["Shows", sorted(shows, key=lambda mbr: attrgetter('sort_name')(mbr))],
+                ["Anime", sorted(anime, key=lambda mbr: attrgetter('sort_name')(mbr))]
             ]
         else:
             sortedShowLists = [
-                ["Shows", sorted(sickbeard.showList, key=lambda mbr: attrgetter('name')(mbr).lower())]
+                ["Shows", sorted(sickbeard.showList, key=lambda mbr: attrgetter('sort_name')(mbr))]
             ]
 
         bwl = None
@@ -1596,7 +1629,7 @@ class Home(WebRoot):
             if bool(show_obj.season_folders) != season_folders:
                 show_obj.season_folders = season_folders
                 try:
-                    sickbeard.showQueueScheduler.action.refreshShow(show_obj)
+                    sickbeard.showQueueScheduler.action.refresh_show(show_obj)
                 except CantRefreshShowException as e:
                     errors.append(_("Unable to refresh this show: {error}").format(error=e))
 
@@ -1631,7 +1664,7 @@ class Home(WebRoot):
                     try:
                         show_obj.location = location
                         try:
-                            sickbeard.showQueueScheduler.action.refreshShow(show_obj)
+                            sickbeard.showQueueScheduler.action.refresh_show(show_obj)
                         except CantRefreshShowException as e:
                             errors.append(_("Unable to refresh this show: {error}").format(error=e))
                             # grab updated info from TVDB
@@ -1647,7 +1680,7 @@ class Home(WebRoot):
         # force the update
         if do_update:
             try:
-                sickbeard.showQueueScheduler.action.updateShow(show_obj, True)
+                sickbeard.showQueueScheduler.action.update_show(show_obj, True)
                 time.sleep(cpu_presets[sickbeard.CPU_PRESET])
             except CantUpdateShowException as e:
                 errors.append(_("Unable to update show: {error}").format(error=e))
@@ -1735,7 +1768,7 @@ class Home(WebRoot):
 
         # force the update
         try:
-            sickbeard.showQueueScheduler.action.updateShow(show_obj, bool(force))
+            sickbeard.showQueueScheduler.action.update_show(show_obj, bool(force))
         except CantUpdateShowException as e:
             ui.notifications.error(_("Unable to update this show."), ex(e))
 
@@ -2073,6 +2106,14 @@ class Home(WebRoot):
                 logger.log('No Show Object found for show with indexerID: ' + str(searchThread.show.indexerid), logger.WARNING)
                 return results
 
+            # noinspection PyProtectedMember
+            def relative_ep_location(ep_loc, show_loc):
+                """ Returns the relative location compared to the show's location """
+                if ep_loc and show_loc and ep_loc.lower().startswith(show_loc.lower()):
+                    return ep_loc[len(show_loc) + 1:]
+                else:
+                    return ep_loc
+
             if isinstance(searchThread, sickbeard.search_queue.ManualSearchQueueItem):
                 # noinspection PyProtectedMember
                 results.append({
@@ -2084,7 +2125,7 @@ class Home(WebRoot):
                     'status': statusStrings[searchThread.segment.status],
                     'quality': self.getQualityClass(searchThread.segment),
                     'overview': Overview.overviewStrings[show_obj.getOverview(searchThread.segment.status)],
-                    'location': searchThread.segment._location,
+                    'location': relative_ep_location(searchThread.segment._location, show_obj._location),
                     'size': pretty_file_size(searchThread.segment.file_size) if searchThread.segment.file_size else ''
                 })
             else:
@@ -2099,7 +2140,7 @@ class Home(WebRoot):
                         'status': statusStrings[ep_obj.status],
                         'quality': self.getQualityClass(ep_obj),
                         'overview': Overview.overviewStrings[show_obj.getOverview(ep_obj.status)],
-                        'location': ep_obj._location,
+                        'location': relative_ep_location(ep_obj._location, show_obj._location),
                         'size': pretty_file_size(ep_obj.file_size) if ep_obj.file_size else ''
                     })
 
@@ -2136,6 +2177,8 @@ class Home(WebRoot):
                 if not [i for i, j in zip(searchThread.segment, episodes) if i.indexerid == j['episodeindexid']]:
                     episodes += getEpisodes(searchThread, searchstatus)
 
+        self.set_header('Cache-Control', 'max-age=0,no-cache,no-store')
+        self.set_header('Content-Type', 'application/json')
         return json.dumps({'episodes': episodes})
 
     @staticmethod
@@ -2479,7 +2522,7 @@ class HomeAddShows(Home):
             tmp = root_dirs[default_index]
             if tmp in root_dirs:
                 root_dirs.remove(tmp)
-                root_dirs = [tmp] + root_dirs
+                root_dirs.insert(0, tmp)
 
         dir_list = []
 
@@ -2605,13 +2648,13 @@ class HomeAddShows(Home):
         elif traktList == "anticipated":
             page_title = _("Most Anticipated Shows")
         elif traktList == "collected":
-            page_title = "Most Collected Shows"
+            page_title = _("Most Collected Shows")
         elif traktList == "watched":
-            page_title = "Most Watched Shows"
+            page_title = _("Most Watched Shows")
         elif traktList == "played":
-            page_title = "Most Played Shows"
+            page_title = _("Most Played Shows")
         elif traktList == "recommended":
-            page_title = "Recommended Shows"
+            page_title = _("Recommended Shows")
         elif traktList == "newshow":
             page_title = _("New Shows")
         elif traktList == "newseason":
@@ -2829,7 +2872,7 @@ class HomeAddShows(Home):
         show_dir = None
 
         # add the show
-        sickbeard.showQueueScheduler.action.addShow(
+        sickbeard.showQueueScheduler.action.add_show(
             indexer=1, indexer_id=indexer_id, showDir=show_dir, default_status=default_status, quality=quality,
             season_folders=season_folders, lang=indexer_lang, subtitles=subtitles, subtitles_sr_metadata=None,
             anime=anime, scene=scene, paused=None, blacklist=blacklist, whitelist=whitelist,
@@ -2949,7 +2992,7 @@ class HomeAddShows(Home):
         newQuality = Quality.combineQualities([int(q) for q in anyQualities], [int(q) for q in bestQualities])
 
         # add the show
-        sickbeard.showQueueScheduler.action.addShow(
+        sickbeard.showQueueScheduler.action.add_show(
             indexer, indexer_id, showDir=show_dir, default_status=int(defaultStatus), quality=newQuality,
             season_folders=season_folders, lang=indexerLang, subtitles=subtitles, subtitles_sr_metadata=subtitles_sr_metadata,
             anime=anime, scene=scene, paused=None, blacklist=blacklist, whitelist=whitelist,
@@ -3017,7 +3060,7 @@ class HomeAddShows(Home):
 
             if indexer is not None and indexer_id is not None:
                 # add the show
-                sickbeard.showQueueScheduler.action.addShow(
+                sickbeard.showQueueScheduler.action.add_show(
                     indexer, indexer_id, show_dir,
                     default_status=sickbeard.STATUS_DEFAULT,
                     quality=sickbeard.QUALITY_DEFAULT,
@@ -3524,18 +3567,18 @@ class Manage(Home, WebRoot):
                 continue
 
             if curShowID in toDelete:
-                sickbeard.showQueueScheduler.action.removeShow(show_obj, True)
+                sickbeard.showQueueScheduler.action.remove_show(show_obj, True)
                 # don't do anything else if it's being deleted
                 continue
 
             if curShowID in toRemove:
-                sickbeard.showQueueScheduler.action.removeShow(show_obj)
+                sickbeard.showQueueScheduler.action.remove_show(show_obj)
                 # don't do anything else if it's being remove
                 continue
 
             if curShowID in toUpdate:
                 try:
-                    sickbeard.showQueueScheduler.action.updateShow(show_obj, True)
+                    sickbeard.showQueueScheduler.action.update_show(show_obj, True)
                     updates.append(show_obj.name)
                 except CantUpdateShowException as e:
                     errors.append(_("Unable to update show: {excption_format}").format(excption_format=e))
@@ -3543,13 +3586,13 @@ class Manage(Home, WebRoot):
             # don't bother refreshing shows that were updated anyway
             if curShowID in toRefresh and curShowID not in toUpdate:
                 try:
-                    sickbeard.showQueueScheduler.action.refreshShow(show_obj)
+                    sickbeard.showQueueScheduler.action.refresh_show(show_obj)
                     refreshes.append(show_obj.name)
                 except CantRefreshShowException as e:
                     errors.append(_("Unable to refresh show {show_name}: {excption_format}").format(show_name=show_obj.name, excption_format=e))
 
             if curShowID in toRename:
-                sickbeard.showQueueScheduler.action.renameShowEpisodes(show_obj)
+                sickbeard.showQueueScheduler.action.rename_show_episodes(show_obj)
                 renames.append(show_obj.name)
 
             if curShowID in toSubtitle:
@@ -3954,13 +3997,12 @@ class ConfigGeneral(Config):
         sickbeard.PROXY_SETTING = proxy_setting
         sickbeard.PROXY_INDEXERS = config.checkbox_to_value(proxy_indexers)
 
-        git_credentials_changed = sickbeard.GIT_AUTH_TYPE, sickbeard.GIT_USERNAME, sickbeard.GIT_PASSWORD, sickbeard.GIT_TOKEN != git_auth_type, git_username, git_password, git_token
         sickbeard.GIT_AUTH_TYPE = int(git_auth_type)
         sickbeard.GIT_USERNAME = git_username
         sickbeard.GIT_PASSWORD = git_password
         sickbeard.GIT_TOKEN = git_token
 
-        if git_credentials_changed:
+        if (sickbeard.GIT_AUTH_TYPE, sickbeard.GIT_USERNAME, sickbeard.GIT_PASSWORD, sickbeard.GIT_TOKEN) != (git_auth_type, git_username, git_password, git_token):
             # Re-Initializes sickbeard.gh, so a restart isn't necessary
             setup_github()
 
@@ -3977,7 +4019,9 @@ class ConfigGeneral(Config):
 
         sickbeard.SSL_VERIFY = config.checkbox_to_value(ssl_verify)
         # sickbeard.LOG_DIR is set in config.change_log_dir()
-        sickbeard.COMING_EPS_MISSED_RANGE = try_int(coming_eps_missed_range, 7)
+
+        sickbeard.COMING_EPS_MISSED_RANGE = config.min_max(coming_eps_missed_range, 7, 0, 42810)
+
         sickbeard.DISPLAY_ALL_SEASONS = config.checkbox_to_value(display_all_seasons)
         sickbeard.NOTIFY_ON_LOGIN = config.checkbox_to_value(notify_on_login)
         sickbeard.WEB_PORT = try_int(web_port)
@@ -4001,7 +4045,7 @@ class ConfigGeneral(Config):
 
         if time_preset:
             sickbeard.TIME_PRESET_W_SECONDS = time_preset
-            sickbeard.TIME_PRESET = sickbeard.TIME_PRESET_W_SECONDS.replace(":%S", "")
+            sickbeard.TIME_PRESET = time_preset.replace(":%S", "")
 
         sickbeard.TIMEZONE_DISPLAY = timezone_display
 
@@ -4338,45 +4382,35 @@ class ConfigPostProcessing(Config):
 
         if self.isNamingValid(naming_pattern, naming_multi_ep, anime_type=naming_anime) != "invalid":
             sickbeard.NAMING_PATTERN = naming_pattern
-            sickbeard.NAMING_MULTI_EP = int(naming_multi_ep)
-            sickbeard.NAMING_ANIME = int(naming_anime)
+            sickbeard.NAMING_MULTI_EP = try_int(naming_multi_ep, NAMING_LIMITED_EXTEND_E_PREFIXED)
             sickbeard.NAMING_FORCE_FOLDERS = naming.check_force_season_folders()
         else:
-            if int(naming_anime or 0) in [1, 2]:
-                results.append(_("You tried saving an invalid anime naming config, not saving your naming settings"))
-            else:
-                results.append(_("You tried saving an invalid naming config, not saving your naming settings"))
+            results.append(_("You tried saving an invalid normal naming config, not saving your naming settings"))
 
         if self.isNamingValid(naming_anime_pattern, naming_anime_multi_ep, anime_type=naming_anime) != "invalid":
             sickbeard.NAMING_ANIME_PATTERN = naming_anime_pattern
-            sickbeard.NAMING_ANIME_MULTI_EP = int(naming_anime_multi_ep)
-            sickbeard.NAMING_ANIME = int(naming_anime)
+            sickbeard.NAMING_ANIME_MULTI_EP = try_int(naming_anime_multi_ep, NAMING_LIMITED_EXTEND_E_PREFIXED)
+            sickbeard.NAMING_ANIME = try_int(naming_anime, 3)
             sickbeard.NAMING_FORCE_FOLDERS = naming.check_force_season_folders()
         else:
-            if int(naming_anime or 0) in [1, 2]:
-                results.append(_("You tried saving an invalid anime naming config, not saving your naming settings"))
-            else:
-                results.append(_("You tried saving an invalid naming config, not saving your naming settings"))
+            results.append(_("You tried saving an invalid anime naming config, not saving your naming settings"))
 
         if self.isNamingValid(naming_abd_pattern, None, abd=True) != "invalid":
             sickbeard.NAMING_ABD_PATTERN = naming_abd_pattern
         else:
-            results.append(
-                "You tried saving an invalid air-by-date naming config, not saving your air-by-date settings")
+            results.append("You tried saving an invalid air-by-date naming config, not saving your air-by-date settings")
 
         if self.isNamingValid(naming_sports_pattern, None, sports=True) != "invalid":
             sickbeard.NAMING_SPORTS_PATTERN = naming_sports_pattern
         else:
-            results.append(
-                "You tried saving an invalid sports naming config, not saving your sports settings")
+            results.append("You tried saving an invalid sports naming config, not saving your sports settings")
 
         sickbeard.save_config()
 
-        if len(results) > 0:
+        if results:
             for x in results:
                 logger.log(x, logger.WARNING)
-            ui.notifications.error(_('Error(s) Saving Configuration'),
-                                   '<br>\n'.join(results))
+            ui.notifications.error(_('Error(s) Saving Configuration'), '<br>\n'.join(results))
         else:
             ui.notifications.message(_('Configuration Saved'), ek(os.path.join, sickbeard.CONFIG_FILE))
 
@@ -4384,15 +4418,7 @@ class ConfigPostProcessing(Config):
 
     @staticmethod
     def testNaming(pattern=None, multi=None, abd=False, sports=False, anime_type=None):
-
-        if multi is not None:
-            multi = int(multi)
-
-        if anime_type is not None:
-            anime_type = int(anime_type)
-
-        result = naming.test_name(pattern, multi, abd, sports, anime_type)
-
+        result = naming.test_name(pattern, try_int(multi, None), abd, sports, try_int(anime_type, None))
         result = ek(os.path.join, result[b'dir'], result[b'name'])
 
         return result
@@ -4401,12 +4427,6 @@ class ConfigPostProcessing(Config):
     def isNamingValid(pattern=None, multi=None, abd=False, sports=False, anime_type=None):
         if not pattern:
             return "invalid"
-
-        if multi is not None:
-            multi = int(multi)
-
-        if anime_type is not None:
-            anime_type = int(anime_type)
 
         # air by date shows just need one check, we don't need to worry about season folders
         if abd:
@@ -4420,10 +4440,10 @@ class ConfigPostProcessing(Config):
 
         else:
             # check validity of single and multi ep cases for the whole path
-            is_valid = naming.check_valid_naming(pattern, multi, anime_type)
+            is_valid = naming.check_valid_naming(pattern, try_int(multi, None), try_int(anime_type, None))
 
             # check validity of single and multi ep cases for only the file name
-            require_season_folders = naming.check_force_season_folders(pattern, multi, anime_type)
+            require_season_folders = naming.check_force_season_folders(pattern, try_int(multi, None), try_int(anime_type, None))
 
         if is_valid and not require_season_folders:
             return "valid"

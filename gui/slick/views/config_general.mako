@@ -6,6 +6,12 @@
     from sickbeard.common import SKIPPED, ARCHIVED, IGNORED, statusStrings, cpu_presets
     from sickbeard.sbdatetime import sbdatetime, date_presets, time_presets
     from sickbeard.helpers import anon_url
+
+    # noinspection PyProtectedMember
+    from tornado._locale_data import LOCALE_NAMES
+
+    def lang_name(code):
+        return LOCALE_NAMES.get(code, {}).get("name", u"Unknown")
 %>
 
 <%block name="tabs">
@@ -341,7 +347,7 @@
                                         <select id="gui_language" name="gui_language" class="form-control input-sm input250">
                                             <option value="" ${('', 'selected="selected"')[sickbeard.GUI_LANG == ""]}>${_('System Language')}</option>
                                             % for lang in [language for language in os.listdir(sickbeard.LOCALE_DIR) if '_' in language]:
-                                                <option value="${lang}" ${('', 'selected="selected"')[sickbeard.GUI_LANG == lang]}>${lang}</option>
+                                                <option value="${lang}" ${('', 'selected="selected"')[sickbeard.GUI_LANG == lang]}>${lang_name(lang)}</option>
                                             % endfor
                                         </select>
                                     </div>
@@ -465,7 +471,8 @@
                             <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
                                 <div class="row">
                                     <div class="col-md-12">
-                                        <input type="number" step="1" min="7" name="coming_eps_missed_range" id="coming_eps_missed_range" value="${sickbeard.COMING_EPS_MISSED_RANGE}" class="form-control input-sm input75" />
+                                        <input type="number" step="1" min="0" max="42810" name="coming_eps_missed_range" id="coming_eps_missed_range"
+                                               value="${sickbeard.COMING_EPS_MISSED_RANGE}" class="form-control input-sm input75" />
                                     </div>
                                 </div>
                                 <div class="row">
