@@ -206,7 +206,7 @@ def process_dir(process_path, release_name=None, process_method=None, force=Fals
             continue
 
         # noinspection PyTypeChecker
-        unwanted_files = filter(lambda x: x in video_files + rar_files + ['.stfolder'], file_names)
+        unwanted_files = filter(lambda x: x in video_files + rar_files, file_names)
         if unwanted_files:
             result.output += log_helper("Found unwanted files: {0}".format(unwanted_files), logger.DEBUG)
 
@@ -533,7 +533,8 @@ def process_failed(process_path, release_name, result):
         if processor:
             result.output += processor.log
 
-        if sickbeard.DELETE_FAILED and result.result and delete_folder(process_path, check_empty=False):
+        if sickbeard.DELETE_FAILED and result.result:
+            if delete_folder(process_path, check_empty=False):
                 result.output += log_helper("Deleted folder: {0}".format(process_path), logger.DEBUG)
 
         if result.result:

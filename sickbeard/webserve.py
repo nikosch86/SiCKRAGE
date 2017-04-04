@@ -156,6 +156,7 @@ class PageTemplate(MakoTemplate):
         self.arguments['controller'] = "FixME"
         self.arguments['action'] = "FixME"
         self.arguments['show'] = UNDEFINED
+        self.arguments['manage_torrents_url'] = helpers.manage_torrents_url()
 
     def render(self, *args, **kwargs):
         for key in self.arguments:
@@ -347,21 +348,6 @@ class KeyHandler(RequestHandler):
         except Exception:
             logger.log('Failed doing key request: {0}'.format((traceback.format_exc())), logger.ERROR)
             self.finish({'success': False, 'error': 'Failed returning results'})
-
-
-class LocaleFileHandler(StaticFileHandler):
-    """ Handles serving locale data on /locale/messages.json for js-gettext """
-    def initialize(self, path):
-        """ Alter 'path' to replace {lang_code} with the requested lang (for example: en_US) """
-        self.abs_path = ek(os.path.normpath, path.format(lang_code=sickbeard.GUI_LANG))
-        super(LocaleFileHandler, self).initialize(self.abs_path)
-
-    def get(self, path='messages.json', include_body=True):
-        """ Get messages.json of the requested lang """
-        if os.path.isfile(os.path.join(self.abs_path, path)):
-            super(LocaleFileHandler, self).get(path, include_body)
-        else:
-            raise HTTPError(404)
 
 
 @route('(.*)(/?)')
@@ -605,6 +591,19 @@ class UI(WebRoot):
     def __init__(self, *args, **kwargs):
         super(UI, self).__init__(*args, **kwargs)
 
+    def locale_json(self):
+        """ Get /locale/{lang_code}/LC_MESSAGES/messages.json """
+        locale_file = ek(os.path.normpath, '{locale_dir}/{lang}/LC_MESSAGES/messages.json'.format(
+            locale_dir=sickbeard.LOCALE_DIR, lang=sickbeard.GUI_LANG))
+
+        if os.path.isfile(locale_file):
+            self.set_header('Content-Type', 'application/json')
+            with open(locale_file, 'r') as content:
+                return content.read()
+        else:
+            self.set_status(204)  # "No Content"
+            return None
+
     @staticmethod
     def add_message():
         ui.notifications.message(_('Test 1'), _('This is test number 1'))
@@ -652,24 +651,32 @@ class UI(WebRoot):
                 return content.read()
         return None
 
+    def custom_css(self):
+        if sickbeard.CUSTOM_CSS_PATH and ek(os.path.isfile, sickbeard.CUSTOM_CSS_PATH):
+            self.set_header('Content-Type', 'text/css')
+            with open(sickbeard.CUSTOM_CSS_PATH, 'r') as content:
+                return content.read()
+        return None
+
 
 @route('/browser(/?.*)')
 class WebFileBrowser(WebRoot):
     def __init__(self, *args, **kwargs):
         super(WebFileBrowser, self).__init__(*args, **kwargs)
 
-    def index(self, path='', includeFiles=False, imagesOnly=False):  # pylint: disable=arguments-differ
+    def index(self, path='', includeFiles=False, fileTypes=''):  # pylint: disable=arguments-differ
 
         self.set_header('Cache-Control', 'max-age=0,no-cache,no-store')
         self.set_header('Content-Type', 'application/json')
 
-        return json.dumps(foldersAtPath(path, True, bool(int(includeFiles)), bool(int(imagesOnly))))
+        return json.dumps(foldersAtPath(path, True, bool(int(includeFiles)), fileTypes.split(',')))
 
-    def complete(self, term, includeFiles=False, imagesOnly=False):
+    def complete(self, term, includeFiles=False, fileTypes=''):
 
         self.set_header('Cache-Control', 'max-age=0,no-cache,no-store')
         self.set_header('Content-Type', 'application/json')
-        paths = [entry['path'] for entry in foldersAtPath(ek(os.path.dirname, term), includeFiles=bool(int(includeFiles)), imagesOnly=bool(int(imagesOnly)))
+        paths = [entry['path'] for entry in foldersAtPath(ek(os.path.dirname, term), includeFiles=bool(int(includeFiles)),
+                                                          fileTypes=fileTypes.split(','))
                  if 'path' in entry]
 
         return json.dumps(paths)
@@ -879,9 +886,9 @@ class Home(WebRoot):
             return _("Error sending Telegram notification: {message}").format(message=message)
 
     @staticmethod
-    def testJoin(join_id=None):
+    def testJoin(join_id=None, join_apikey=None):
 
-        result, message = notifiers.join_notifier.test_notify(join_id)
+        result, message = notifiers.join_notifier.test_notify(join_id, join_apikey)
         if result:
             return _("join notification succeeded. Check your join clients to make sure it worked")
         else:
@@ -927,11 +934,6 @@ class Home(WebRoot):
             return _("Pushover notification succeeded. Check your Pushover clients to make sure it worked")
         else:
             return _("Error sending Pushover notification")
-
-    @staticmethod
-    def putio_authorize():
-        client = clients.getClientInstance('putio')
-        return client().authentication_url  # pylint: disable=protected-access
 
     @staticmethod
     def twitterStep1():
@@ -1658,7 +1660,6 @@ class Home(WebRoot):
                 logger.log(old_location + " != " + location, logger.DEBUG)  # pylint: disable=protected-access
                 if not (ek(os.path.isdir, location) or sickbeard.CREATE_MISSING_SHOW_DIRS or sickbeard.ADD_SHOWS_WO_DIR):
                     errors.append(_("New location <tt>{location}</tt> does not exist").format(location=location))
-
                 else:
                     # change it
                     try:
@@ -3631,34 +3632,6 @@ class Manage(Home, WebRoot):
 
         return self.redirect("/manage/")
 
-    def manageTorrents(self):
-        t = PageTemplate(rh=self, filename="manage_torrents.mako")
-        info_download_station = ''
-
-        if re.search('localhost', sickbeard.TORRENT_HOST):
-            webui_url = re.sub('localhost', sickbeard.LOCALHOST_IP or helpers.get_lan_ip(), sickbeard.TORRENT_HOST)
-        else:
-            webui_url = sickbeard.TORRENT_HOST
-
-        if sickbeard.TORRENT_METHOD == 'utorrent':
-            webui_url = '/'.join(s.strip('/') for s in (webui_url, 'gui/'))
-        if sickbeard.TORRENT_METHOD == 'download_station':
-            if helpers.check_url(urljoin(webui_url, 'download/')):
-                webui_url += 'download/'
-            else:
-                info_download_station = '<p>' + _('For best results please set the Download Station alias as') + ' <code>download</code>. '
-                info_download_station += _('You can check this setting in the Synology DSM') + ' ' + '<b>' + _('Control Panel') + '</b> > <b>' + _('Application Portal') + '</b>.'
-                info_download_station += _('Make sure you allow DSM to be embedded with iFrames too in') + ' ' + '<b>'
-                info_download_station += _('Control Panel') + '</b> > <b>' + _('DSM Settings') + '</b> > <b>' + _('Security') + '</b>.'
-                info_download_station += '</p><br>'
-
-        if not sickbeard.TORRENT_PASSWORD == "" and not sickbeard.TORRENT_USERNAME == "":
-            webui_url = re.sub('://', '://' + str(sickbeard.TORRENT_USERNAME) + ':' + str(sickbeard.TORRENT_PASSWORD) + '@', webui_url)
-
-        return t.render(
-            webui_url=webui_url, info_download_station=info_download_station,
-            title=_('Manage Torrents'), header=_('Manage Torrents'), topmenu='manage')
-
     def failedDownloads(self, limit=100, toRemove=None):
         failed_db_con = db.DBConnection('failed.db')
 
@@ -3897,6 +3870,44 @@ class Config(WebRoot):
         )
 
 
+@route('/config/shares(/?.*)')
+class ConfigShares(Config):
+    def __init__(self, *args, **kwargs):
+        super(ConfigShares, self).__init__(*args, **kwargs)
+
+    def index(self):
+
+        t = PageTemplate(rh=self, filename="config_shares.mako")
+        return t.render(title=_('Config - Shares'), header=_('Windows Shares Configuration'),
+                        topmenu='config', submenu=self.ConfigMenu(),
+                        controller="config", action="shares")
+
+    def save_shares(self, shares):
+        new_shares = {}
+        for index, share in enumerate(shares):
+            if share.get('server') and share.get('path') and share.get('name'):
+                new_shares[share.get('name')] = {'server': share.get('server'), 'path': share.get('path')}
+            elif any([share.get('server'), share.get('path'), share.get('name')]):
+                info = []
+                if not share.get('name'):
+                    info.append('name')
+                if not share.get('server'):
+                    info.append('server')
+                if not share.get('path'):
+                    info.append('path')
+
+                info = ' and '.join(info)
+                logger.log('Cannot save share #{index}. You must enter name, server and path.'
+                           '{info} {copula} missing, got: [name: {name}, server:{server}, path: {path}]'.format(
+                                index=index, info=info, copula=('is', 'are')['and' in info],
+                                name=share.get('name'), server=share.get('server'), path=share.get('path')))
+
+        sickbeard.WINDOWS_SHARES.clear()
+        sickbeard.WINDOWS_SHARES.update(new_shares)
+
+        ui.notifications.message(_('Saved Shares'), _('Your Windows share settings have been saved'))
+
+
 @route('/config/general(/?.*)')
 class ConfigGeneral(Config):
     def __init__(self, *args, **kwargs):
@@ -3958,7 +3969,8 @@ class ConfigGeneral(Config):
             calendar_unprotected=None, calendar_icons=None, debug=None, ssl_verify=None, no_restart=None, coming_eps_missed_range=None,
             fuzzy_dating=None, trim_zero=None, date_preset=None, date_preset_na=None, time_preset=None,
             indexer_timeout=None, download_url=None, rootDir=None, theme_name=None, default_page=None, fanart_background=None, fanart_background_opacity=None,
-            sickrage_background=None, sickrage_background_path=None, git_reset=None, git_auth_type=0, git_username=None, git_password=None, git_token=None,
+            sickrage_background=None, sickrage_background_path=None, custom_css=None, custom_css_path=None,
+            git_reset=None, git_auth_type=0, git_username=None, git_password=None, git_token=None,
             display_all_seasons=None, gui_language=None):
 
         results = []
@@ -4072,6 +4084,8 @@ class ConfigGeneral(Config):
         config.change_sickrage_background(sickrage_background_path)
         sickbeard.FANART_BACKGROUND = config.checkbox_to_value(fanart_background)
         sickbeard.FANART_BACKGROUND_OPACITY = fanart_background_opacity
+        sickbeard.CUSTOM_CSS = config.checkbox_to_value(custom_css)
+        config.change_custom_css(custom_css_path)
 
         sickbeard.DEFAULT_PAGE = default_page
 
@@ -4272,6 +4286,8 @@ class ConfigSearch(Config):
                 sickbeard.TORRENT_PASSWORD = sickbeard.SYNOLOGY_DSM_PASSWORD
             if not sickbeard.TORRENT_PATH:
                 sickbeard.TORRENT_PATH = sickbeard.SYNOLOGY_DSM_PATH
+
+        helpers.manage_torrents_url(reset=True)
 
         sickbeard.save_config()
 
@@ -4939,7 +4955,7 @@ class ConfigNotifications(Config):
             use_telegram=None, telegram_notify_onsnatch=None, telegram_notify_ondownload=None,
             telegram_notify_onsubtitledownload=None, telegram_id=None, telegram_apikey=None,
             use_join=None, join_notify_onsnatch=None, join_notify_ondownload=None,
-            join_notify_onsubtitledownload=None, join_id=None,
+            join_notify_onsubtitledownload=None, join_id=None, join_apikey=None,
             use_prowl=None, prowl_notify_onsnatch=None, prowl_notify_ondownload=None,
             prowl_notify_onsubtitledownload=None, prowl_api=None, prowl_priority=0,
             prowl_show_list=None, prowl_show=None, prowl_message_title=None,
@@ -5040,6 +5056,7 @@ class ConfigNotifications(Config):
         sickbeard.JOIN_NOTIFY_ONDOWNLOAD = config.checkbox_to_value(join_notify_ondownload)
         sickbeard.JOIN_NOTIFY_ONSUBTITLEDOWNLOAD = config.checkbox_to_value(join_notify_onsubtitledownload)
         sickbeard.JOIN_ID = join_id
+        sickbeard.JOIN_APIKEY = join_apikey
 
         sickbeard.USE_PROWL = config.checkbox_to_value(use_prowl)
         sickbeard.PROWL_NOTIFY_ONSNATCH = config.checkbox_to_value(prowl_notify_onsnatch)
