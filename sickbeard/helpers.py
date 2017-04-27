@@ -62,6 +62,7 @@ from sickbeard import classes, db, logger
 from sickbeard.common import USER_AGENT
 from sickrage.helper import MEDIA_EXTENSIONS, SUBTITLE_EXTENSIONS, episode_num, pretty_file_size
 from sickrage.helper.encoding import ek
+from sickrage.helper.exceptions import ex
 from sickrage.show.Show import Show
 
 
@@ -80,6 +81,14 @@ def getaddrinfo_wrapper(host, port, family=socket.AF_INET, socktype=0, proto=0, 
 if socket.getaddrinfo.__module__ in ('socket', '_socket'):
     logger.log("Patching socket to IPv4 only", logger.DEBUG)
     socket.getaddrinfo = getaddrinfo_wrapper
+
+# Override original shutil function to increase its speed by increasing its buffer to 10MB (optimal)
+copyfileobj_orig = shutil.copyfileobj
+
+def _copyfileobj(fsrc, fdst, length=10485760):
+    """ Run shutil.copyfileobj with a bigger buffer """
+    return copyfileobj_orig(fsrc, fdst, length)
+shutil.copyfileobj = _copyfileobj
 
 
 def indentXML(elem, level=0):
@@ -1790,16 +1799,21 @@ def tvdbid_from_remote_id(indexer_id, indexer):  # pylint:disable=too-many-retur
 
 
 def get_showname_from_indexer(indexer, indexer_id, lang='en'):
-    lINDEXER_API_PARMS = sickbeard.indexerApi(indexer).api_params.copy()
-    lINDEXER_API_PARMS['language'] = lang or sickbeard.INDEXER_DEFAULT_LANGUAGE
+    try:
+        lINDEXER_API_PARMS = sickbeard.indexerApi(indexer).api_params.copy()
+        lINDEXER_API_PARMS['language'] = lang or sickbeard.INDEXER_DEFAULT_LANGUAGE
 
-    logger.log('{0}: {1!r}'.format(sickbeard.indexerApi(indexer).name, lINDEXER_API_PARMS))
+        logger.log('{0}: {1!r}'.format(sickbeard.indexerApi(indexer).name, lINDEXER_API_PARMS))
 
-    t = sickbeard.indexerApi(indexer).indexer(**lINDEXER_API_PARMS)
-    s = t[int(indexer_id)]
+        t = sickbeard.indexerApi(indexer).indexer(**lINDEXER_API_PARMS)
+        s = t[int(indexer_id)]
 
-    if hasattr(s, 'data'):
-        return s.data.get('seriesname')
+        if hasattr(s, 'data'):
+            return s.data.get('seriesname')
+    except (sickbeard.indexer_error, IOError) as e:
+        logger.log("Show id " + str(indexer_id) + " not found on " + sickbeard.indexerApi(indexer).name +
+                   ", not adding show: " + ex(e), logger.WARNING)
+        return None
 
     return None
 
