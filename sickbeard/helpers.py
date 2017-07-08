@@ -31,7 +31,6 @@ import operator
 import os
 import platform
 import random
-import rarfile
 import re
 import shutil
 import socket
@@ -48,25 +47,23 @@ from itertools import cycle, izip
 import adba
 import certifi
 import cfscrape
+import rarfile
 import requests
-from cachecontrol import CacheControl
-from requests.utils import urlparse
-from requests.compat import urljoin
+import sickbeard
 import six
-
+from cachecontrol import CacheControl
+from requests.compat import urljoin
+from requests.utils import urlparse
+from sickbeard import classes, db, logger
+from sickbeard.common import USER_AGENT
+from sickrage.helper import episode_num, MEDIA_EXTENSIONS, pretty_file_size, SUBTITLE_EXTENSIONS
+from sickrage.helper.encoding import ek
+from sickrage.helper.exceptions import ex
+from sickrage.show.Show import Show
 # noinspection PyUnresolvedReferences
 from six.moves import urllib
 # noinspection PyProtectedMember
 from tornado._locale_data import LOCALE_NAMES
-
-import sickbeard
-from sickbeard import classes, db, logger
-from sickbeard.common import USER_AGENT
-from sickrage.helper import MEDIA_EXTENSIONS, SUBTITLE_EXTENSIONS, episode_num, pretty_file_size
-from sickrage.helper.encoding import ek
-from sickrage.helper.exceptions import ex
-from sickrage.show.Show import Show
-
 
 # Add some missing languages
 LOCALE_NAMES.update({
@@ -860,12 +857,12 @@ def create_https_certificates(ssl_cert, ssl_key):
     # Create the CA Certificate
     cakey = createKeyPair(TYPE_RSA, 4096)
     careq = createCertRequest(cakey, CN='Certificate Authority')
-    cacert = createCertificate(careq, (careq, cakey), serial, validity_period, 'sha256')
+    cacert = createCertificate(careq, (careq, cakey), serial, validity_period, b'sha256')
 
     cname = 'SickRage'
     pkey = createKeyPair(TYPE_RSA, 4096)
     req = createCertRequest(pkey, CN=cname)
-    cert = createCertificate(req, (cacert, cakey), serial, validity_period, 'sha256')
+    cert = createCertificate(req, (cacert, cakey), serial, validity_period, b'sha256')
 
     # Save the key and certificate to disk
     try:
